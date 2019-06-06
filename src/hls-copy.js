@@ -6,7 +6,9 @@ import https from "https";
 class HlsCopy {
   constructor() {
     this.masterManifestUrl = null;
-    this.directory = null;
+    this.baseUrl = null;
+    this.outputDirectory = null;
+    this.queue = [];
   }
 
 
@@ -14,7 +16,8 @@ class HlsCopy {
     console.log(`args: url: ${url} directory: ${directory}`);
     this.isValidInput(url, directory);
     this.masterManifestUrl = url;
-    this.directory = directory;
+    this.baseUrl = url.split('/').slice(0, -1).join('/') + '/';
+    this.outputDirectory = directory;
     this.copyHLS()
       .catch(e => {
           console.error("FAILED TO COPY e:" + e);
@@ -23,16 +26,68 @@ class HlsCopy {
   }
 
   async copyHLS() {
-    await this.downloadFile(this.masterManifestUrl, `${this.directory}/${this.masterManifestUrl.split('/').reverse()[0]}`);
+    this.queue.push(this.masterManifestUrl);
+
+    while(this.queue.length > 0) {
+      const [url, ...rest] = this.queue;
+      this.queue = rest;
+
+
+      const filename = `${this.outputDirectory}/${url.replace(this.baseUrl, "")}`;
+
+      await this.downloadFile(url, filename);
+      if (/\.m3u8/.test(url)) {
+        const manifest = fs.readFileSync(filename, { encoding: 'utf8'});
+        const foundUrls = await this.findUrls(manifest, url);
+        this.queue = this.queue.concat(foundUrls);
+        this.queue = this.queue.filter((value,index) => this.queue.indexOf(value) === index); // ensure unique values
+        if (foundUrls.length > 0) {
+          console.log("found urls:" + JSON.stringify(foundUrls, null, 2));
+        }
+      }
+    }
     console.log("DONE");
   }
 
+  async findUrls(manifest, manifestUrl) {
+    const manifestFileName = manifestUrl.split('/').pop();
+
+    const uriRegex = /URI="(\S+)"/;
+
+    return manifest
+      .split('\n')
+      .filter(line => !!line && !(/^\#/.test(line) && !uriRegex.test(line))).map(line => {
+
+        let uri = line;
+        if (uriRegex.test(line)){
+          let [,matchUrl] = line.match(uriRegex);
+          uri = matchUrl;
+        }
+
+        if (/^http/.test(uri)) return uri;
+        return manifestUrl.replace(manifestFileName, uri);
+      });
+
+  }
+
   async downloadFile(url, destination) {
+    const directory = destination.split('/').slice(0,-1).join('/').replace(this.baseUrl, "");
+
+    if (!fs.existsSync(directory)) {
+      try {
+        fs.mkdirSync(directory,  {recursive: true});
+        console.log("created outputDirectory: " + directory);
+      } catch (e) {
+        console.error("FAILED CREATING DIRECTORY: " + directory + "e: " + e);
+        process.exit(1);
+      }
+    }
+
     console.log("downloading file: " + url);
     const file = fs.createWriteStream(destination);
     return new Promise((resolve, reject) => {
       ( /^https/.test(url) ? https : http ).get(url, function(response) {
-        if (response.statusCode != 200) {
+        if (response.statusCode != 200 && response.statusCode != 302) {
           console.error("non-200 response status code:", response.statusCode);
           console.error("for masterManifestUrl:", url);
           return;
@@ -56,7 +111,7 @@ class HlsCopy {
     } else if (!fs.existsSync(directory)) {
       try {
         fs.mkdirSync(directory,  {recursive: true});
-        console.log("created directory: " + directory);
+        console.log("created outputDirectory: " + directory);
       } catch (e) {
         console.error("FAILED CREATING DIRECTORY: " + directory + "e: " + e);
         process.exit(1);
